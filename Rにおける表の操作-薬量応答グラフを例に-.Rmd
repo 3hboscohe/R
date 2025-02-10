@@ -1,0 +1,173 @@
+---
+title: "Rにおける表の操作-薬量応答グラフを例に-"
+author: "Satoshi Iwakami"
+date: "2020/6/4"
+output: html_document
+---
+
+Rにおける表形式のデータの扱いになれてもらうため、薬量応答グラフの作成を例に簡単に解説します。
+
+生物データを扱う場合、図表作成において、実験で得られた数字をそのまま作図に用いることはまれで、logや相対値に変換したい場面がよくあります。また、数字の単位を変更したい（mg ➔ gとか）、読み込んだデータの一部だけで作図が必要になることもしばしばあります。これらの操作をエクセルで行うことも可能ですが、手順を記録することができません。またファイルがいくつもできて、どれがどれだかわからなくなることもよく起こります。NGSで得られるような膨大なデータを扱う場合、エクセルでは開けない、フリーズするなどの問題もしばしば生じます。記録に残せる点、動作が高速な点において、R（に限りませんが）は非常に便利なツールです。  
+
+一方で、表形式データを扱う際には単にグラフを描くときには必要のなかったスキルが必要になります。
+特定の列や行へのアクセス（抽出）、データフレームの結合、列を計算して新たな列を作るなど。
+ここでは現在のRにおいてスタンダードとなっているtydyverseパッケージ群におけるdplyrやtidyrを用いた方法をベースに紹介します。これらのパッケージは、pythonやshellなどの言語と共通する概念も多く、特にNGSや機械学習を行う人はその際にも役立つはずです。  
+
+tydyverse（ggplot2もtydyverseの一部）では古典的なデータフレーム形式ではなく、tibble形式を基本としています（データフレームで操作することも可能）。tibbleはデータフレームよりも便利な事が多いですが、振る舞いが若干ことなるので注意してください。
+
+#### ▶行うこと
+#### 以下のデータについて、新鮮重を無処理句比（%）に計算して、折れ線グラフを描く    
+ファイル：Dose_response1.xlsx
+- ２生物種  
+- ２除草剤（濃度複数）  
+- データは新鮮重（mg）  
+
+[ポイント]  
+
+・無処理区比への変換は実はけっこう難しい（エクセルでもかなり面倒な作業が必要）  
+➔無処理区を抽出したデータフレームを作成して平均値を算出し、元データフレームと結合させて対処している  
+・折れ線グラフはやや難しい作図スキル  
+➔ 要素ごとに平均値やエラーバーの長さを計算し、新たなデータフレームを作る必要がある
+
+#### 学習するスキル（いずれも基本的なものなので、知っておくとよい）
+RユーザーのためのRStudio「実践」入門（ラボの本棚にある）がわかりやすいので、参考にするとよい
+
+%>%：dplyrによるパイプ処理  
+dplyr::mutate()関数：列の追加  
+dplyr::summarise()関数：統計量の要約とその結果を新しい列に追加  
+dplyr::left_join()関数：データフレームの結合  
+dplyr::group_by()関数：グループごとのデータの集計  
+dplyr::filter()関数：条件を満たす要素の抽出  
+tidyr::unite()関数：列と列の結合  
+
+
+#### ▶作業開始
+
+エクセルからデータの読み込み  
+readxlもtydyverseパッケージ  
+tibble形式になっているので、注意する  
+dとタイプしても一部しか表示されない特徴がある（画面を埋め尽くさないような配慮がされている）
+```{r warning=F, message=F}
+library(readxl)
+d <- read_excel("Dose_response1.xlsx")
+d
+```
+
+
+ライブラリ読みこみ
+
+```{r warning=F, message=F}
+library(ggpubr)
+library(tidyverse)
+```
+
+#### [ポイント] あとの操作が楽になるように、種名と除草剤名を結合した列を作る
+tidyr:unite()関数  
+[解説] unite(新しい列名、結合したい列1、結合したい列2, sep=列1と列2をつなぐ文字の指定, remove=列1,2を残すかどうか)
+```{r warning=F, message=F}
+d %>% unite(species_herbicide, species, herbicide, sep = "_", remove = F) ->d1
+d1
+```
+
+
+##### 無処理区の平均値のみ格納したデータフレーム controlを作る    
+
+[方針]  
+dplyr::group_by()関数でspecies_herbicideの種類ごとに、データフレームを分けている  
+それぞれのグループごとに、dplyr::filter()でdose_uM列が0のものを抽出（==は完全一致）  
+dplyr::summarise(新しい列名 = 数式)。ここではmean関数を使って、weight_mgの平均
+
+```{r warning=F, message=F}
+d1 %>% group_by(species_herbicide) %>% filter(dose_uM==0) %>%
+  summarise(control_ave=mean(weight_mg)) -> control
+control
+```
+
+##### オリジナルデータの入ったd1とcontrolを結合させる  
+
+オリジナルデータに無処理区の平均値の列ができることになる   
+dyplyr::left_join()関数  
+species_herbicide列を橋渡しにして結合  
+```{r warning=F, message=F}
+d1 %>% left_join(control, by = "species_herbicide") -> d2
+d2
+```
+
+##### 折れ線グラフ用の平均値やSEの入った新たなデータフレームを作成  
+%に直したのち、平均値やseの計算  
+summarise()のmean、length、sdなどの計算をしている  
+seを直接求める関数はないため、一度sdとlengthを求めて、これらを使って計算
+```{r warning=F, message=F}
+d2 %>% mutate(rel = weight_mg/control_ave*100) %>% 
+  group_by(species_herbicide, species, herbicide, dose_uM) %>%
+  summarise(ave = mean(rel),
+            N = length(rel),
+            sd = sd(rel),
+            se = sd/sqrt(N)
+            ) -> d3
+d3
+```
+
+
+dにdose0という列を作り、そこにdのdose列のデータを格納
+```{r warning=F, message=F}
+d3$dose0 <- d3$dose_uM
+```
+
+dのdose0列を抽出。そのうえで、値が0のものを抽出し、0.0001で置換。  
+x軸をlogにしたいため、0を小さい数字に変更する必要がある
+
+```{r warning=F, message=F}
+d3$dose0[d3$dose0 == 0] <- 0.0001
+```
+
+##### 作図  
+まずは１つの除草剤のみで描いてみる  
+➔filterでBSMのみ抽出し、d4に格納している  
+
+[方針]  
+ggscatterで散布図を描き、geom_lineで線をつなぐ  
+その後、geom_linerangeでエラーバーを付けている  
+・geom_lineのアルファは線の色の透明度を上げて、エラーバーが見えやすくなるような処理
+・scale_x_log10()でx軸をlogスケールに変更
+```{r warning=F, message=F}
+d3 %>% filter(herbicide=="BSM") -> d4
+ggscatter(d4, x = "dose0", y="ave",
+              combine =T, palette = "aaas",
+              color="species",
+              ylab="Relative growth (% of control)",
+              xlab="Herbicide (μM)",
+              font.y=c("bold"),
+              font.x=c("bold"))  +
+  geom_line(aes(group=species, color=species, linetype=species), alpha=0.7) +
+  geom_linerange(aes(ymin=ave-se,
+                     ymax=ave+se,
+                     color=species)) +
+  scale_x_log10() +
+  theme(axis.title = element_text(size = 9),
+        text = element_text(size = 7), 
+        legend.position="right",
+        legend.title = element_blank())
+```
+
+facetを使うと、一気に表示可能  
+scalesで、各除草剤の濃度幅に合わせてx軸の長さを自由に調整できるようにしている
+
+```{r warning=F, message=F}
+ggscatter(d3,x = "dose0", y="ave",
+              combine =T, palette = "jco",
+              color="species",
+              ylab="Relative growth (% of control)",
+              xlab="Herbicide (μM)",
+              font.y=c("bold"),
+              font.x=c("bold"), facet.by = "herbicide", scales="free_x")  +
+  geom_line(aes(group=species, color=species, linetype=species), alpha=0.7) +
+  geom_linerange(aes(ymin=ave-se,
+                     ymax=ave+se,
+                     color=species)) +
+  scale_x_log10() +
+  theme(axis.title = element_text(size = 9),
+        text = element_text(size = 7), 
+        legend.position="right",
+        legend.title = element_blank())
+```
